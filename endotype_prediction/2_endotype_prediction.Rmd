@@ -1,0 +1,119 @@
+---
+title: "Endotype prediction - MEDIVIR"
+date: "`r Sys.Date()`"
+toc-title: "Contents"
+author: "MTH (mth@nordicbio.com)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: false
+    theme: united
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include = FALSE, fig.align = "center"}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(glmnet)
+library(caret)
+options(dplyr.summarise.inform = FALSE)
+set.seed(42)
+```
+
+
+# Endotype prediction
+
+Predict endotype at baseline (visit 2).
+
+```{r}
+# Fetch prediction model
+wkdir = "J:/16_GITHUB/MTH/IM_MTH_APPROACH/8_endotype_prediction_model/"
+filename = "endotype_prediction_model.rds"
+cfit = readRDS(file = paste0(wkdir, filename))
+opt_lambda = cfit$lambda.1se
+variables = rownames(coef(cfit)$inflammatory)[-1]
+variables
+```
+
+
+```{r}
+# Get relevant clinical information
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = "medivir_clinical_30OCT2024.tsv"
+data.clinical = read.delim(file = paste0(wkdir, filename),
+                   header = TRUE,
+                   sep = '\t') %>%
+  rename(SUBJ_ID = SUBJECT) %>%
+  filter(VISIT == "2")
+
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = "medivir_biomarkers_RF_imputed_30OCT2024.tsv"
+data0 = read.delim(file = paste0(wkdir, filename),
+                   header = TRUE,
+                   sep = '\t') %>%
+  rename(SUBJ_ID = SUBJECT) %>%
+  select(SUBJ_ID, starts_with("VISIT2"))
+
+# Add sex to biomarker data
+data = data0 %>% 
+  left_join(data.clinical %>% select(SUBJ_ID, Sex, Age, BMI) %>% unique, 
+            by = "SUBJ_ID") %>%
+  mutate(Sex_binary = case_when(Sex == "F" ~ 1,
+                                Sex == "M" ~ 0))
+
+data.scale = data %>%
+  mutate(across(c(Age, BMI, starts_with("VISIT2")), scale)) %>%
+  ungroup()
+
+# Rename columns to fit training data
+colnames(data.scale) = gsub("VISIT2_", "", colnames(data.scale))
+
+data.scale = data.scale %>%
+  rename(S_NMID = N_MID,
+         S_CTXI_01 = sCTX_I,
+         S_C2M_HP = C2M_HP,
+         S_C3M_HP = C3M_HP,
+         S_PRO_C2_HP = PRO_C2,
+         S_PRO_C4_HP = PRO_C4_HP)
+
+data.pred = data.scale %>%
+  select(all_of(variables)) %>%
+  as.matrix
+
+preds = predict(cfit, newx = data.pred, s = opt_lambda) %>%
+  as_tibble()
+colnames(preds) = gsub(".1", "", colnames(preds))
+
+preds.bin = preds %>%
+    as_tibble %>%
+    rowwise %>%
+    mutate(bin = names(.)[which.max(c(inflammatory, structural_damage, low_turnover))]) %>%
+    ungroup %>%
+    mutate_at(vars(bin), factor) %>%
+    pull(bin)
+
+table(preds.bin)
+```
+
+```{r}
+# Save predicted endotype information
+endotype = data %>%
+  select(SUBJ_ID) %>%
+  mutate(predicted_endotype = preds.bin)
+
+wkdir = "J:/16_GITHUB/MTH/IM_MTH_MEDIVIR/endotype_prediction/"
+filename = "predicted.endotypes.baseline.tsv"
+write.table(endotype, file = paste0(wkdir, filename),
+            row.names = FALSE,
+            quote = FALSE,
+            sep = "\t")
+```
+
+

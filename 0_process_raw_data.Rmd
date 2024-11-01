@@ -1,0 +1,162 @@
+---
+title: "Processing raw biochemical measurements and peptide/serum controls"
+date: "`r Sys.Date()`"
+toc-title: "Contents"
+author: "MTH (mth@nordicbio.com)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: false
+    theme: united
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+  
+```{r setup, include = FALSE, fig.align = "center"}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(pdftools)
+library(stringr)
+library(readr)
+library(lubridate)
+library(readxl)
+options(dplyr.summarise.inform = FALSE)
+"%ni%" = Negate("%in%")
+```
+
+
+
+# Process raw biochemical measurements
+## Platform: i10
+
+```{r}
+# Fetch directories for raw data of all biomarkers measured on i10
+raw.dat.dir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/NB2015-042 MIV-711-201-302 2024/"
+platform = "i10"
+all.dirs = list.dirs(paste0(raw.dat.dir, platform))
+i10.marker.dirs = all.dirs[str_detect(all.dirs, regex("RAW DATA|RAWDATA", ignore_case = TRUE))]
+# Fetch pdf file names
+res.files = list.files(path = i10.marker.dirs, pattern = "_RES",
+                       full.names = TRUE,
+                       ignore.case = TRUE)
+
+# Define analysis date strings (DD MM YYYY or YYYY MM DD) with "/" or "-" as separators
+date.string = "^[0-9]{2}-[0-9]{2}-[0-9]{4}$|^[0-9]{2}/[0-9]{2}/[0-9]{4}$|^[0-9]{4}-[0-9]{2}-[0-9]{2}$|^[0-9]{4}/[0-9]{2}/[0-9]{2}$"
+
+# Iterate over each run file to fetch raw measurements, date and time stamp
+pdf.res.list = lapply(res.files,
+                 function(res.file){
+                   # Read pdf file
+                   pdf.dat0 = pdf_text(pdf = res.file) %>%
+                     read_lines()
+                   
+                   # Replace commas with dots and remove white space
+                   pdf.dat = gsub(",", "\\.", pdf.dat0) %>% 
+                     str_squish()
+                   
+                   # Skip lines with stars (*) as they represent NAs
+                   pdf.dat = pdf.dat[str_detect(pdf.dat, "\\*", negate = TRUE)]
+                   
+                   # Get analysis date (assuming one run = one date)
+                   # Unify analysis date to one format YYYY-MM-DD
+                   analysis.date = unique(pdf.dat[str_detect(pdf.dat, date.string)]) %>%
+                     parse_date_time(., orders = c("ymd", "dmy")) %>%
+                     format("%Y-%m-%d")
+                   # Handle if date not found
+                   if(length(analysis.date) == 0){
+                     analysis.date = NA
+                   }
+                   analysis.date = analysis.date[1]
+
+                   # Subset to rows with ANALYTE/RLU - all else is redundant
+                   pdf.dat = pdf.dat[str_detect(pdf.dat, "ANALYTE|RLU")]
+                   
+                   # First row will be column names in data frame
+                   cols = strsplit(pdf.dat[1], " ")[[1]]
+                   # Remove dot in column names
+                   cols = gsub("\\.", "", cols)
+                   # Handle duplicate column names
+                   cols = make.names(cols, unique = TRUE)
+                   # Remove "POS" column position (is empty and cause issues)
+                   cols = cols[str_detect(cols, regex("POS", ignore_case = TRUE), negate = TRUE)]
+                   
+                   # Remove headers from data
+                   pdf.dat = pdf.dat[str_detect(pdf.dat, "ANALYTE", negate = TRUE)]
+                   
+                   # Handle time column if listed in AM/PM
+                   pdf.dat = gsub(" AM$", "_AM", pdf.dat)
+                   pdf.dat = gsub(" PM$", "_PM", pdf.dat)
+                   
+                   # Skip data over measurement range (OMR)
+                   pdf.dat = pdf.dat[str_detect(pdf.dat, "OMR+", negate = TRUE)]
+                   
+                   # Convert to data frame
+                   pdf.mat.tmp = strsplit(pdf.dat, " ")
+                   
+                   # Check if there is an extra column in some of the lines, 
+                   # indicating a non-empty message
+                   message.pos = match("Message", cols)
+                   if(length(unique(lengths(pdf.mat.tmp))) > 1){
+                     max.columns = max(lengths(pdf.mat.tmp))
+                     # Add extra empty column in columns with no message
+                     res.tmp = lapply(pdf.mat.tmp,
+                                      function(x){
+                                        if(length(x) < max.columns){
+                                          x = append(x, NA, after = message.pos - 1)
+                                          } else {
+                                            x = x
+                                            }
+                                        })
+                     } else{
+                       # Add empty column for all position in files with no messages
+                       res.tmp = lapply(pdf.mat.tmp,
+                                        function(x){
+                                          x = append(x, NA, after = message.pos - 1)
+                                        })
+                     }
+                   
+                   pdf.mat = unlist(res.tmp)
+                   pdf.data = as.data.frame(matrix(pdf.mat, ncol = length(cols), byrow = TRUE))
+                   colnames(pdf.data) = cols
+                   
+                   # Remove "_" from cases with AM/PM in time column
+                   pdf.data$HOUR = gsub("_AM", " AM", pdf.data$HOUR)
+                   pdf.data$HOUR = gsub("_PM", " PM", pdf.data$HOUR)
+                                   
+                   # Format data
+                   pdf.data = pdf.data %>%
+                     rename(time = HOUR) %>%
+                     mutate(date = analysis.date,
+                            # "Op" handles AM/PM notation (e.g., 1PM = 13)
+                            time = format(parse_date_time(time, orders = c("HMS", "HMSOp")), "%H:%M:%S"),
+                            file_of_origin = res.file,
+                            platform = platform) %>%
+                     mutate_at(vars(CONC), as.numeric)
+                 })
+pdf.res = do.call(rbind, pdf.res.list)
+```
+
+```{r}
+# Clean up biomarker names
+pdf.res = pdf.res %>%
+  mutate(ANALYTE = case_when(ANALYTE == "na40" ~ "PRO_C2",
+                             ANALYTE == "aa05" ~ "VICM",
+                             TRUE ~ ANALYTE),
+          ANALYTE = case_when(str_detect(ANALYTE, "_HP", negate = TRUE) == TRUE ~ paste0(ANALYTE, "_HP"),
+                               TRUE ~ ANALYTE)) %>%
+  select(-REF)
+
+# Save raw data
+write.csv(pdf.res,
+          file = paste0(raw.dat.dir, "raw_measurements_i10.csv"),
+          quote = FALSE,
+          row.names = FALSE)
+```
+
+

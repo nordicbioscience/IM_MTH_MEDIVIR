@@ -1,0 +1,839 @@
+---
+title: "Differential treatment response of predicted endotypes of MEDIVIR"
+date: "`r Sys.Date()`"
+toc-title: "Contents"
+author: "MTH (mth@nordicbio.com)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: false
+    theme: united
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include = FALSE, fig.align = "center"}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(glmnet)
+library(caret)
+library(emmeans)
+library(forestplot)
+options(dplyr.summarise.inform = FALSE)
+"%ni%" = Negate("%in%")
+```
+
+
+
+# Introduction
+
+Assess differential treatment response in predicted endotypes in MEDIVIR using the trained model from APPROACH.
+
+```{r}
+# Fetch predicted endotype labels
+wkdir = "J:/16_GITHUB/MTH/IM_MTH_MEDIVIR/endotype_prediction/"
+filename = "predicted.endotypes.baseline.tsv"
+predicted.endotypes = read.table(file = paste0(wkdir, filename),
+                                 header = TRUE)
+
+# Get clinical information
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = "medivir_clinical_30OCT2024.tsv"
+data.clinical = read.table(file = paste0(wkdir, filename),
+                  header = TRUE, 
+                  sep = "\t") %>%
+  rename(SUBJ_ID = SUBJECT) %>%
+  mutate(VISIT = paste0("VISIT", VISIT)) %>%
+  pivot_longer(cols = contains(c("WOMAC", "NRS")),
+               names_to = "parameter") %>%
+  pivot_wider(names_from = c("VISIT", "parameter"),
+              values_from = value)
+
+# Get sCXT-I and uCTX-II measurements (secondary outcome measures from study)
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = "medivir_biomarkers_RF_imputed_30OCT2024.tsv"
+data.biomarkers = read.table(file = paste0(wkdir, filename),
+                             header = TRUE) %>%
+  rename(SUBJ_ID = SUBJECT) %>%
+  select(SUBJ_ID, contains("CTX")) %>%
+  # Back-transform measurements
+  mutate(across(-SUBJ_ID, ~exp(.) - 1))
+
+data = predicted.endotypes %>% 
+  left_join(data.clinical, by = "SUBJ_ID") %>%
+  left_join(data.biomarkers, by = "SUBJ_ID") %>%
+  # Calculate changes
+  mutate(WOMACPAIN_CH = VISIT8_WOMAC_PAIN - VISIT2_WOMAC_PAIN,
+         WOMACFUNC_CH = VISIT8_WOMAC_FUNC - VISIT2_WOMAC_FUNC,
+         WOMACSTIFF_CH = VISIT8_WOMAC_STIFF - VISIT2_WOMAC_STIFF,
+         NRSKNEEPAIN_CH = VISIT8_NRS_KNEE_PAIN - VISIT2_NRS_KNEE_PAIN,
+         # Change biomarkers to percent change from baseline
+         SCTX_CH = 100*(VISIT8_sCTX_I - VISIT2_sCTX_I)/VISIT2_sCTX_I,
+         UCTXII_CH = 100*(VISIT8_uCTX_II_CREA - VISIT2_uCTX_II_CREA)/VISIT2_uCTX_II_CREA,
+         # Add numerical differences in biomarkers as well
+         SCTX_CH_NUM = VISIT8_sCTX_I - VISIT2_sCTX_I,
+         UCTXII_CH_NUM = VISIT8_uCTX_II_CREA - VISIT2_uCTX_II_CREA) %>%
+  mutate_at(vars(predicted_endotype, Sex), factor)
+
+data$TREATMENT_SHORT = factor(data$TREATMENT_SHORT, levels = c("PLACEBO", "MIV-711"))
+data$predicted_endotype = relevel(data$predicted_endotype, ref = "structural_damage")
+```
+
+
+
+# Treatment response - ANCOVA
+## NRS Knee pain
+
+Primary study outcome was change from visit 2 to 8 in NRS average target knee pain score.
+
+```{r}
+lm.fit = lm(NRSKNEEPAIN_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_NRS_KNEE_PAIN, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.1 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.1 = str.estimate.1 - qt(p = 0.975, df = df)*se
+str.upper.1 = str.estimate.1 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.1 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.1 = infl.estimate.1 - qt(p = 0.975, df = df)*se
+infl.upper.1 = infl.estimate.1 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.1 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.1 = low.estimate.1 - qt(p = 0.975, df = df)*se
+low.upper.1 = low.estimate.1 + qt(p = 0.975, df = df)*se
+```
+
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(NRSKNEEPAIN_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_NRS_KNEE_PAIN, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.1 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.1 = overall.estimate.1 - qt(p = 0.975, df = df)*se
+overall.upper.1 = overall.estimate.1 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.1, infl.estimate.1, low.estimate.1, overall.estimate.1),
+       lower = c(str.lower.1, infl.lower.1, low.lower.1, overall.lower.1),
+       upper = c(str.upper.1, infl.upper.1, low.upper.1, overall.upper.1),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta NRS Knee pain (%)",
+             ci.vertices = TRUE,
+             lineheight =  unit(8.6,"mm"),
+             boxsize = 0.25,
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## WOMAC Pain
+
+```{r}
+lm.fit = lm(WOMACPAIN_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_WOMAC_PAIN, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.2 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.2 = str.estimate.2 - qt(p = 0.975, df = df)*se
+str.upper.2 = str.estimate.2 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.2 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.2 = infl.estimate.2 - qt(p = 0.975, df = df)*se
+infl.upper.2 = infl.estimate.2 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.2 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.2 = low.estimate.2 - qt(p = 0.975, df = df)*se
+low.upper.2 = low.estimate.2 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(WOMACPAIN_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_WOMAC_PAIN, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.2 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.2 = overall.estimate.2 - qt(p = 0.975, df = df)*se
+overall.upper.2 = overall.estimate.2 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.2, infl.estimate.2, low.estimate.2, overall.estimate.2),
+       lower = c(str.lower.2, infl.lower.2, low.lower.2, overall.lower.2),
+       upper = c(str.upper.2, infl.upper.2, low.upper.2, overall.upper.2),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta WOMAC Pain (%)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## WOMAC Function
+
+```{r}
+lm.fit = lm(WOMACFUNC_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_WOMAC_FUNC, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.3 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.3 = str.estimate.3 - qt(p = 0.975, df = df)*se
+str.upper.3 = str.estimate.3 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.3 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.3 = infl.estimate.3 - qt(p = 0.975, df = df)*se
+infl.upper.3 = infl.estimate.3 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.3 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.3 = low.estimate.3 - qt(p = 0.975, df = df)*se
+low.upper.3 = low.estimate.3 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(WOMACFUNC_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_WOMAC_FUNC, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.3 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.3 = overall.estimate.3 - qt(p = 0.975, df = df)*se
+overall.upper.3 = overall.estimate.3 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.3, infl.estimate.3, low.estimate.3, overall.estimate.3),
+       lower = c(str.lower.3, infl.lower.3, low.lower.3, overall.lower.3),
+       upper = c(str.upper.3, infl.upper.3, low.upper.3, overall.upper.3),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta WOMAC Function (%)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+ 
+
+
+## WOMAC Stiffness
+
+```{r}
+lm.fit = lm(WOMACSTIFF_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_WOMAC_STIFF, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.4 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.4 = str.estimate.4 - qt(p = 0.975, df = df)*se
+str.upper.4 = str.estimate.4 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.4 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.4 = infl.estimate.4 - qt(p = 0.975, df = df)*se
+infl.upper.4 = infl.estimate.4 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.4 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.4 = low.estimate.4 - qt(p = 0.975, df = df)*se
+low.upper.4 = low.estimate.4 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(WOMACSTIFF_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_WOMAC_STIFF, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.4 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.4 = overall.estimate.4 - qt(p = 0.975, df = df)*se
+overall.upper.4 = overall.estimate.4 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.4, infl.estimate.4, low.estimate.4, overall.estimate.4),
+       lower = c(str.lower.4, infl.lower.4, low.lower.4, overall.lower.4),
+       upper = c(str.upper.4, infl.upper.4, low.upper.4, overall.upper.4),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta WOMAC Stiffness (%)",
+             ci.vertices = TRUE,
+             boxsize = 0.25, 
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## sCTX-I
+
+```{r}
+lm.fit = lm(SCTX_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_sCTX_I, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.5 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.5 = str.estimate.5 - qt(p = 0.975, df = df)*se
+str.upper.5 = str.estimate.5 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.5 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.5 = infl.estimate.5 - qt(p = 0.975, df = df)*se
+infl.upper.5 = infl.estimate.5 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.5 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.5 = low.estimate.5 - qt(p = 0.975, df = df)*se
+low.upper.5 = low.estimate.5 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(SCTX_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_sCTX_I, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.5 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.5 = overall.estimate.5 - qt(p = 0.975, df = df)*se
+overall.upper.5 = overall.estimate.5 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.5, infl.estimate.5, low.estimate.5, overall.estimate.5),
+       lower = c(str.lower.5, infl.lower.5, low.lower.5, overall.lower.5),
+       upper = c(str.upper.5, infl.upper.5, low.upper.5, overall.upper.5),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta sCTX-I (%)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## uCTX-II
+
+```{r}
+lm.fit = lm(UCTXII_CH ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_uCTX_II_CREA, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.6 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.6 = str.estimate.6 - qt(p = 0.975, df = df)*se
+str.upper.6 = str.estimate.6 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.6 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.6 = infl.estimate.6 - qt(p = 0.975, df = df)*se
+infl.upper.6 = infl.estimate.6 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.6 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.6 = low.estimate.6 - qt(p = 0.975, df = df)*se
+low.upper.6 = low.estimate.6 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(UCTXII_CH ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_uCTX_II_CREA, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.6 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.6 = overall.estimate.6 - qt(p = 0.975, df = df)*se
+overall.upper.6 = overall.estimate.6 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.6, infl.estimate.6, low.estimate.6, overall.estimate.6),
+       lower = c(str.lower.6, infl.lower.6, low.lower.6, overall.lower.6),
+       upper = c(str.upper.6, infl.upper.6, low.upper.6, overall.upper.6),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta uCTX-II (%)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## sCTX-I - numerical difference
+
+```{r}
+lm.fit = lm(SCTX_CH_NUM ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_sCTX_I, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.7 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.7 = str.estimate.7 - qt(p = 0.975, df = df)*se
+str.upper.7 = str.estimate.7 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.7 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.7 = infl.estimate.7 - qt(p = 0.975, df = df)*se
+infl.upper.7 = infl.estimate.7 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.7 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.7 = low.estimate.7 - qt(p = 0.975, df = df)*se
+low.upper.7 = low.estimate.7 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(SCTX_CH_NUM ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_sCTX_I, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.7 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.7 = overall.estimate.7 - qt(p = 0.975, df = df)*se
+overall.upper.7 = overall.estimate.7 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.7, infl.estimate.7, low.estimate.7, overall.estimate.7),
+       lower = c(str.lower.7, infl.lower.7, low.lower.7, overall.lower.7),
+       upper = c(str.upper.7, infl.upper.7, low.upper.7, overall.upper.7),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta sCTX-I (num)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+
+## uCTX-II - numerical difference
+
+```{r}
+lm.fit = lm(UCTXII_CH_NUM ~ TREATMENT_SHORT + Age + Sex + BMI + TREATMENT_SHORT*predicted_endotype + VISIT2_uCTX_II_CREA, data = data)
+em = emmeans(lm.fit, ~TREATMENT_SHORT|predicted_endotype)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+Get confidence intervals.
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Structural damage
+str.estimate.8 = res$estimate[1]
+se = res$SE[1]
+df = res$df[1]
+str.lower.8 = str.estimate.8 - qt(p = 0.975, df = df)*se
+str.upper.8 = str.estimate.8 + qt(p = 0.975, df = df)*se
+
+# Inflammatory
+infl.estimate.8 = res$estimate[2]
+se = res$SE[2]
+df = res$df[2]
+infl.lower.8 = infl.estimate.8 - qt(p = 0.975, df = df)*se
+infl.upper.8 = infl.estimate.8 + qt(p = 0.975, df = df)*se
+
+# Low turnover
+low.estimate.8 = res$estimate[3]
+se = res$SE[3]
+df = res$df[3]
+low.lower.8 = low.estimate.8 - qt(p = 0.975, df = df)*se
+low.upper.8 = low.estimate.8 + qt(p = 0.975, df = df)*se
+```
+
+Overall test if there is difference in effect (remove interaction term in simpler model).
+
+```{r}
+lm.fit2 = lm(UCTXII_CH_NUM ~ TREATMENT_SHORT + Age + Sex + BMI + VISIT2_uCTX_II_CREA, data = data)
+anova(lm.fit2, lm.fit)
+```
+
+Overall effect.
+
+```{r}
+em = emmeans(lm.fit2, ~TREATMENT_SHORT)
+pairs(em, rev = TRUE) %>% rbind(adjust = "holm")
+```
+
+```{r}
+res = summary(pairs(em, rev = TRUE) %>% rbind(adjust = "holm"))
+
+# Overall effect
+overall.estimate.8 = res$estimate
+se = res$SE
+df = res$df
+overall.lower.8 = overall.estimate.8 - qt(p = 0.975, df = df)*se
+overall.upper.8 = overall.estimate.8 + qt(p = 0.975, df = df)*se
+```
+
+```{r, fig.width = 5}
+dat.forest = tibble(mean = c(str.estimate.8, infl.estimate.8, low.estimate.8, overall.estimate.8),
+       lower = c(str.lower.8, infl.lower.8, low.lower.8, overall.lower.8),
+       upper = c(str.upper.8, infl.upper.8, low.upper.8, overall.upper.8),
+       endotype = c("Structural damage", "Inflammatory", "Low tissue turnover", "Overall"))
+
+dat.forest %>%
+  forestplot(labeltext = endotype,
+             xlab = "Delta uCTX-II (num)",
+             ci.vertices = TRUE,
+             boxsize = 0.25,
+             lineheight =  unit(8.6,"mm"),
+             col = fpColors(zero = "black")) |>
+  fp_add_header(endotype = "Endotype") |>
+  fp_set_style(box = "darkblue",
+               line = "royalblue",
+               txt_gp = fpTxtGp(xlab = gpar(cex = 1.5),
+                                ticks = gpar(cex = 1.5),
+                                cex = 1.5))
+```
+
+
+# Collect results
+
+```{r, echo = FALSE}
+tibble(endotype = c("structural damage", "inflammatory", "low turnover", "overall"),
+       delta_NRSKNEEPAIN = c(paste0(format(round(str.estimate.1, 3), nsmall = 3), " (", format(round(str.lower.1, 3), nsmall = 3), ",", format(round(str.upper.1, 3), nsmall = 3), ")"),
+                paste0(format(round(infl.estimate.1, 3), nsmall = 3), " (", format(round(infl.lower.1, 3), nsmall = 3), ",", format(round(infl.upper.1, 3), nsmall = 3), ")"),
+                paste0(format(round(low.estimate.1, 3), nsmall = 3), " (", format(round(low.lower.1, 3), nsmall = 3), ",", format(round(low.upper.1, 3), nsmall = 3), ")"),
+                paste0(format(round(overall.estimate.1, 3), nsmall = 3), " (", format(round(overall.lower.1, 3), nsmall = 3), ",", format(round(overall.upper.1, 3), nsmall = 3), ")")),
+       delta_WOMACPAIN_pct = c(paste0(format(round(str.estimate.2, 2), nsmall = 2), " (", format(round(str.lower.2, 2), nsmall = 2), ",", format(round(str.upper.2, 2), nsmall = 2), ")"),
+                paste0(format(round(infl.estimate.2, 2), nsmall = 2), " (", format(round(infl.lower.2, 2), nsmall = 2), ",", format(round(infl.upper.2, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.2, 2), nsmall = 2), " (", format(round(low.lower.2, 2), nsmall = 2), ",", format(round(low.upper.2, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.2, 2), nsmall = 2), " (", format(round(overall.lower.2, 2), nsmall = 2), ",", format(round(overall.upper.2, 2), nsmall = 2), ")")),
+       delta_WOMACFUNC_pct = c(paste0(format(round(str.estimate.3, 2), nsmall = 2), " (", format(round(str.lower.3, 2), nsmall = 2), ",", format(round(str.upper.3, 3), nsmall = 3), ")"),
+                paste0(format(round(infl.estimate.3, 2), nsmall = 2), " (", format(round(infl.lower.3, 2), nsmall = 2), ",", format(round(infl.upper.3, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.3, 2), nsmall = 2), " (", format(round(low.lower.3, 2), nsmall = 2), ",", format(round(low.upper.3, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.3, 2), nsmall = 2), " (", format(round(overall.lower.3, 2), nsmall = 2), ",", format(round(overall.upper.3, 2), nsmall = 2), ")")),
+       delta_WOMACSTIFF_pct = c(paste0(format(round(str.estimate.4, 2), nsmall = 2), " (", format(round(str.lower.4, 2), nsmall = 2), ",", format(round(str.upper.4, 3), nsmall = 3), ")"),
+                paste0(format(round(infl.estimate.4, 2), nsmall = 2), " (", format(round(infl.lower.4, 2), nsmall = 2), ",", format(round(infl.upper.4, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.4, 2), nsmall = 2), " (", format(round(low.lower.4, 2), nsmall = 2), ",", format(round(low.upper.4, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.4, 2), nsmall = 2), " (", format(round(overall.lower.4, 2), nsmall = 2), ",", format(round(overall.upper.4, 2), nsmall = 2), ")")),
+       delta_sCTXI_pct = c(paste0(format(round(str.estimate.5, 2), nsmall = 2), " (", format(round(str.lower.5, 2), nsmall = 2), ",", format(round(str.upper.5, 2), nsmall = 2), ")"),
+                paste0(format(round(infl.estimate.5, 2), nsmall = 2), " (", format(round(infl.lower.5, 2), nsmall = 2), ",", format(round(infl.upper.5, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.5, 2), nsmall = 2), " (", format(round(low.lower.5, 2), nsmall = 2), ",", format(round(low.upper.5, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.5, 2), nsmall = 2), " (", format(round(overall.lower.5, 2), nsmall = 2), ",", format(round(overall.upper.5, 2), nsmall = 2), ")")),
+       delta_uCTX_II_pct = c(paste0(format(round(str.estimate.6, 2), nsmall = 2), " (", format(round(str.lower.6, 2), nsmall = 2), ",", format(round(str.upper.6, 2), nsmall = 2), ")"),
+                paste0(format(round(infl.estimate.6, 2), nsmall = 2), " (", format(round(infl.lower.6, 2), nsmall = 2), ",", format(round(infl.upper.6, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.6, 2), nsmall = 2), " (", format(round(low.lower.6, 2), nsmall = 2), ",", format(round(low.upper.6, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.6, 2), nsmall = 2), " (", format(round(overall.lower.6, 2), nsmall = 2), ",", format(round(overall.upper.6, 2), nsmall = 2), ")")),
+       delta_sCTXI_num = c(paste0(format(round(str.estimate.7, 2), nsmall = 2), " (", format(round(str.lower.7, 2), nsmall = 2), ",", format(round(str.upper.7, 2), nsmall = 2), ")"),
+                paste0(format(round(infl.estimate.7, 2), nsmall = 2), " (", format(round(infl.lower.7, 2), nsmall = 2), ",", format(round(infl.upper.7, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.7, 2), nsmall = 2), " (", format(round(low.lower.7, 2), nsmall = 2), ",", format(round(low.upper.7, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.7, 2), nsmall = 2), " (", format(round(overall.lower.7, 2), nsmall = 2), ",", format(round(overall.upper.7, 2), nsmall = 2), ")")),
+       delta_uCTX_II_num = c(paste0(format(round(str.estimate.8, 2), nsmall = 2), " (", format(round(str.lower.8, 2), nsmall = 2), ",", format(round(str.upper.8, 2), nsmall = 2), ")"),
+                paste0(format(round(infl.estimate.8, 2), nsmall = 2), " (", format(round(infl.lower.8, 2), nsmall = 2), ",", format(round(infl.upper.8, 2), nsmall = 2), ")"),
+                paste0(format(round(low.estimate.8, 2), nsmall = 2), " (", format(round(low.lower.8, 2), nsmall = 2), ",", format(round(low.upper.8, 2), nsmall = 2), ")"),
+                paste0(format(round(overall.estimate.8, 2), nsmall = 2), " (", format(round(overall.lower.8, 2), nsmall = 2), ",", format(round(overall.upper.8, 2), nsmall = 2), ")"))) %>%
+  pivot_longer(cols = !contains("endotype"),
+               values_to = "effect_size_95_CI",
+               names_to = "parameter") %>%
+  arrange(parameter, endotype) %>%
+  as.data.frame
+```
+
+Mean change in parameters split by treatment and endotype.
+
+```{r}
+data %>%
+  group_by(predicted_endotype, TREATMENT_SHORT) %>%
+  summarize(mean_NRSKNEEPAIN_CH = mean(NRSKNEEPAIN_CH, na.rm = TRUE) %>% round(digits = 3) %>% format(nsmall = 3),
+            mean_WOMACPAIN_CH = mean(WOMACPAIN_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_WOMACFUNC_CH = mean(WOMACFUNC_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_WOMACSTIFF_CH = mean(WOMACSTIFF_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_SCTXI_CH = mean(SCTX_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_UCTXII_CH = mean(UCTXII_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_SCTXI_CH_NUM = mean(SCTX_CH_NUM, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_UCTXII_CH_NUM = mean(UCTXII_CH_NUM, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2)) %>%
+  pivot_longer(contains("mean"),
+               names_to = "parameter",
+               values_to = "mean_change") %>%
+  arrange(parameter, predicted_endotype) %>%
+  as.data.frame
+```
+
+Mean change in parameters split by treatment on overall population.
+
+```{r}
+data %>%
+  group_by(TREATMENT_SHORT) %>%
+  summarize(mean_NRSKNEEPAIN_CH = mean(NRSKNEEPAIN_CH, na.rm = TRUE) %>% round(digits = 3) %>% format(nsmall = 3),
+            mean_WOMACPAIN_CH = mean(WOMACPAIN_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_WOMACFUNC_CH = mean(WOMACFUNC_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_WOMACSTIFF_CH = mean(WOMACSTIFF_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_SCTXI_CH = mean(SCTX_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_UCTXII_CH = mean(UCTXII_CH, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_SCTXI_CH_NUM = mean(SCTX_CH_NUM, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2),
+            mean_UCTXII_CH_NUM = mean(UCTXII_CH_NUM, na.rm = TRUE) %>% round(digits = 2) %>% format(nsmall = 2)) %>%
+  pivot_longer(contains("mean"),
+               names_to = "parameter",
+               values_to = "mean_change") %>%
+  arrange(parameter) %>%
+  as.data.frame
+```

@@ -1,0 +1,1002 @@
+---
+title: "Data processing of first and last visit data"
+date: "`r Sys.Date()`"
+toc-title: "Contents"
+author: "MTH (mth@nordicbio.com)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: false
+    theme: united
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include = FALSE, fig.align = "center"}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(gridExtra)
+library(ggbeeswarm)
+library(readxl)
+library(lubridate)
+library(tidyr)
+library(stringr)
+library(lme4)
+library(gridExtra)
+library(grid)
+library(pheatmap)
+library(haven)
+options(dplyr.summarise.inform = FALSE)
+"%ni%" = Negate("%in%")
+
+# Define function to customize plots
+custom_theme = function(axis.text = 14, x.angle = 0, hjust = 0.5, vjust = 1){
+    theme(axis.text.x = element_text(size = axis.text, hjust = hjust, vjust = vjust, angle = x.angle),
+        axis.text.y = element_text(size = axis.text),
+        axis.title.y = element_text(size = axis.text),
+        axis.title.x = element_text(size = axis.text),
+        axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = axis.text,
+                                    face = "bold"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 1))
+}
+
+# Custom violin plot with layered box-plot
+custom_violin_box = function(dat, marker, y.value, x.value = "visit", fill.column = "visit", marker.column = "ANALYSIS", plot.title = NULL, show.legend = FALSE, outlier = FALSE, notch = TRUE){
+  p = dat %>%
+    filter(!!sym(marker.column) == marker) %>%
+    ggplot(aes(x = !!sym(x.value), y = !!sym(y.value), fill = !!sym(fill.column))) +
+    geom_violin(aes(fill = !!sym(fill.column)), alpha = 0.5,
+                color = NA,
+                show.legend = show.legend) +
+    geom_boxplot(notch = notch, 
+                  outlier.size = -1,
+                  alpha = 0.7,
+                  show.legend = FALSE,
+                  width = 0.9) +
+     geom_quasirandom(shape = 21, size = 2,
+                      color ="black",
+                      alpha = 0.3,
+                      show.legend = FALSE) +
+    scale_fill_viridis_d() +
+    theme_cowplot() +
+    custom_theme() +
+    labs(x = "", 
+         y = dat %>% pull(UNIT),
+         title = plot.title)
+  
+  if(outlier){
+    p = p + geom_text(aes(label = ifelse(outlier == 1, SUBJ_ID, "")), size = 3,
+            position = position_dodge(width = 1))
+  }
+  return(p)
+}
+
+
+# Define function to impute data sets (assuming wide format)
+custom_impute = function(data.wide, impute_function = "rf"){
+  # Initialize
+  require(missForest)
+  require(multiUS)
+  set.seed(42)
+  data.out = list()
+  
+  # Format input data
+  data.imp = data.wide %>%
+      select(-SUBJECT) %>%
+      as.matrix
+  
+  # Random forest imputation
+  if(tolower(impute_function) == "rf"){
+    data.imputed = data.imp %>% 
+      missForest(ntree = 300)
+    
+    # Out-of-bag error
+    oob = data.imputed$OOBerror
+    # Imputed data
+    data.imputed = data.imputed$ximp
+      
+    data.out$OOB = oob
+  }
+  
+  # KNN imputation
+  if(tolower(impute_function) == "knn"){
+    data.imputed = data.imp %>%
+      KNNimp(k = 3, scale = TRUE)
+  }
+  
+  # Format output
+  data.out$imp = data.imputed %>%
+    as_tibble %>%
+    mutate(SUBJECT = data.wide %>% pull(SUBJECT)) %>%
+    relocate(SUBJECT)
+  return(data.out)
+}
+```
+
+
+
+# Collect data
+
+```{r}
+# reC1M-HP, CALC2, C2M-HP, C3M-HP, CRPC, CRPM, PRO-C1-HP, PRO-C3-roRHP, PRO-C4-HP (2022)
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/Trial#03_HEP/"
+filename = "MIV-711-201-302_05AUG2022_1.xlsx"
+data0 = read_excel(paste0(wkdir, filename),
+                   na = c("", NA, "ND", "none")) %>%
+  mutate_at(vars(RESULT), as.numeric) %>%
+  select(-BATCH)
+
+# huARGS, PRO-C2, TC2M (2021)
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/NB2015-042 (MIV-711-201-301)/"
+filename = "MIV-711-201-302_01MAR2021_with REQ.xlsx"
+data1 = read_excel(paste0(wkdir, filename),
+                   na = c("", NA, "ND", "none")) %>%
+  mutate_at(vars(RESULT), as.numeric) %>%
+  select(-c(BATCH, REQUISITION))
+
+# N-MID, VICM-HP, PRO-C2-HP (2024)
+# Visit info missing for 257 samples for now
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/NB2015-042 MIV-711-201-302 2024/"
+filename = "MIV-711-201 302_13SEP2024.xlsx"
+data2 = read_excel(paste0(wkdir, filename),
+                   na = c("", NA, "ND", "none")) %>%
+  mutate_at(vars(RESULTS), as.numeric) %>%
+  select(-c(BARCODE, Subject_ID, ANALYSIS_TYPE, INSTRUMENT, VISIT_NAME, LLOQ)) %>%
+  rename(SUBJECT = SCREENING,
+         ANALYSIS = REPORTED_NAME,
+         RESULT = RESULTS,
+         UNIT = UNITS,
+         COMMENT = COMMENTS)
+
+# sCTX-I, uCTX-II, treatment group information
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/Analysis datasets/preprocessed_data/"
+filename = "NB_2015042_biomarkers_longformat.txt"
+data3 = read.table(file = paste0(wkdir, filename),
+                   header = TRUE,
+                   na.strings = c("", NA, "ND", "none")) %>%
+  filter(biomarker %in% c("CTXI", "CTXIICRT")) %>%
+  rename(ANALYSIS = biomarker,
+         VISIT = visit,
+         RESULT = biomarker_value,
+         TREATMENT = TRTP) %>% 
+  mutate(PROJECT = "MIV-711-201-302",
+         UNIT = NA,
+         ANALYSIS_DATE = NA,
+         COMMENT = NA,
+         # Dash has been removed from ID, add back to be compatible with rest of data
+         SUBJECT =paste0(substr(USUBJID, 1, 4), "-", substr(USUBJID, 5, 8))) %>%
+  select(-c(USUBJID, TRTPN))
+```
+
+Combine biomarker data.
+
+```{r}
+# Combine biomarker data
+data.biomarkers = data0 %>% 
+  rbind(., data1)
+
+data.biomarkers = data2 %>% 
+  relocate(colnames(data.biomarkers)) %>%
+  rbind(., data.biomarkers) %>%
+  mutate()
+
+data.biomarkers = data3 %>%
+  relocate(colnames(data.biomarkers)) %>%
+  select(-TREATMENT) %>%
+  rbind(., data.biomarkers)
+
+# Add treatment information
+treat.dat = data3 %>%
+  select(SUBJECT, TREATMENT) %>%
+  unique
+
+data.biomarkers = data.biomarkers %>%
+  left_join(treat.dat, by = "SUBJECT") %>%
+  mutate(TREATMENT_SHORT = case_when(TREATMENT == "PLACEBO" ~ TREATMENT,
+                                     TRUE ~ "MIV-711"))
+
+# Format data
+data.biomarkers = data.biomarkers %>%
+  # Skip samples with no visit info or early termination patients
+  drop_na(VISIT) %>%
+  filter(VISIT != "Visit ET") %>% 
+  mutate(VISIT = str_extract(VISIT, "\\d"),
+         ANALYSIS = case_when(ANALYSIS == "CTXI" ~ "sCTX_I",
+                              ANALYSIS == "CTXIICRT" ~ "uCTX_II_CREA",
+                              ANALYSIS == "N-MID Osteocalcin" ~ "N_MID",
+                              TRUE ~ ANALYSIS))
+data.biomarkers$ANALYSIS = gsub("-", "_", data.biomarkers$ANALYSIS)
+```
+
+Add age, BMI, sex data.
+
+```{r}
+# Age, BMI, sex
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/MIV-711_2021_05_04/01 Raw Data/Stryker MRI/"
+filename = "Main dataset.xlsx"
+data.clinical = read_excel(paste0(wkdir, filename)) %>%
+  rename(SUBJECT = `Subject Identifier`,
+         BMI = BMI_scr) %>%
+  select(SUBJECT, Age, Sex, BMI) %>%
+  # Dash has been removed from ID, add back to be compatible with rest of data
+  mutate(SUBJECT = paste0(substr(SUBJECT, 1, 4), "-", substr(SUBJECT, 5, 8)))
+
+data = data.biomarkers %>%
+  left_join(data.clinical, by = "SUBJECT")
+```
+
+Add WOMAC scores (Higher scores indicate worse symptoms, according to study protocol). Measured on numeric rating scale (NRS) (0 = no pain/stiffness/function to 10 = extreme pain/stiffness/function).
+
+```{r}
+# QS = has WOMAC scores, SC = target knee info
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/MIV-711_2021_05_04/01 Raw Data/MIV-711-201 final sdtm 20180105/"
+filename = "qs.sas7bdat"
+pros = read_sas(paste0(wkdir, filename)) %>%
+  mutate(SUBJECT = str_extract(USUBJID, "(\\d+)$"),
+         SUBJECT = paste0(substr(SUBJECT, 1, 4), "-", substr(SUBJECT, 5, 8)),
+         VISIT = str_extract(VISIT, "\\d"))
+
+# Q1 - Q5: Pain
+pain = 1:5
+# Q6 - Q7: Stiffness
+stiff = 6:7
+# Q8 - Q24: Function
+func = 8:24
+
+womac = pros %>%
+  filter(str_detect(QSTESTCD, "WOMAC")) %>%
+  mutate(QSTESTCD = str_extract(QSTESTCD, "\\d+")) %>%
+  select(SUBJECT, VISIT, QSTESTCD, QSSTRESN) %>%
+  mutate(WOMAC_CLASS = case_when(QSTESTCD %in% pain ~ "WOMAC_PAIN",
+                                 QSTESTCD %in% stiff ~ "WOMAC_STIFF",
+                                 QSTESTCD %in% func ~ "WOMAC_FUNC")) %>%
+  group_by(SUBJECT, VISIT, WOMAC_CLASS) %>%
+  summarize(tot = sum(QSSTRESN, na.rm = TRUE)) %>%
+  ungroup %>%
+  pivot_wider(names_from = "WOMAC_CLASS",
+              values_from = "tot") %>%
+  # Convert to percentages
+  mutate(WOMAC_PAIN = WOMAC_PAIN*100/50,
+         WOMAC_STIFF = WOMAC_STIFF*100/20,
+         WOMAC_FUNC = WOMAC_FUNC*100/170)
+
+data = data %>%
+  left_join(womac, by = c("SUBJECT", "VISIT"))
+```
+
+Add NRS knee pain score (0 - 10), which was the primary study outcome.
+
+```{r}
+knee.pain = pros %>% 
+  filter(QSTEST == "Overall pain severity in target knee") %>%
+  select(SUBJECT, VISIT, QSSTRESN) %>%
+  mutate(NRS_KNEE_PAIN = QSSTRESN*100/10) %>%
+  select(-QSSTRESN)
+
+data = data %>%
+  left_join(knee.pain, by = c("SUBJECT", "VISIT")) %>%
+  drop_na(VISIT, TREATMENT)
+```
+
+Primary outcome: NRS average target knee pain score (change from visit 2 - 8)
+Key secondary outcome: knee joint MRI bone area
+Secondary outcome (relevant examples): WOMAC function, pain, stiffness, QOL, sCTX-I, uCTX-II
+
+JSW and KL grade not considered due to length of study (according to study protocol).
+
+Note, we will not consider the different treatment subgroups (different dosages), but will consider placebo vs treatment.
+
+
+
+# Trim data
+
+We will only consider data from Visit 2 (baseline) and Visit 8 (last visit of study).
+
+```{r}
+data.sub = data %>%
+  filter(VISIT %in% c(2, 8)) %>%
+  mutate(log_value = log(RESULT + 1))
+
+data.sub = data.sub %>%
+  group_by(VISIT, TREATMENT_SHORT, ANALYSIS) %>%
+  # Summarize all relevant quantiles and bounds
+  summarise(qrt25 = quantile(log_value, probs = 0.25, na.rm = TRUE),
+            qrt75 = quantile(log_value, probs = 0.75, na.rm = TRUE),
+            iqr = 1.5*IQR(log_value, na.rm = TRUE),
+            lower_bound = quantile(log_value, probs = 0.02, na.rm = TRUE),
+            upper_bound = quantile(log_value, probs = 0.98, na.rm = TRUE)) %>%
+  # Add summarize output back to the data object
+  inner_join(data.sub, by = c("VISIT", "TREATMENT_SHORT", "ANALYSIS")) %>%
+  group_by(VISIT, TREATMENT_SHORT, ANALYSIS) %>%
+  # If extremely low, replace with lower bound,
+  # If extremely high, replace with upper bound,
+  mutate(log_value_winsor = case_when(log_value < qrt25 - iqr ~ lower_bound,
+                                      log_value > qrt75 + iqr ~ upper_bound,
+                                      TRUE ~ log_value),
+         value_winsor = exp(log_value_winsor) - 1,
+         outlier = case_when(log_value < qrt25 - iqr ~ "1",
+                             log_value > qrt75 + iqr ~ "1",
+                             TRUE ~ "0")) %>%
+  # Removed redundant summary columns
+  select(-qrt25, -qrt75, -iqr, -lower_bound, -upper_bound) %>%
+  ungroup %>%
+  relocate(SUBJECT) %>%
+  arrange(SUBJECT, VISIT, TREATMENT_SHORT, ANALYSIS)
+```
+
+
+
+# Batch effect correction
+
+We need to make sure all visits and treatment groups are represented in order to be able to batch correct for differing analysis dates of the biomarkers.
+
+```{r}
+data.sub %>%
+  drop_na(ANALYSIS_DATE) %>%
+  group_by(ANALYSIS, ANALYSIS_DATE) %>%
+  count(VISIT, TREATMENT_SHORT) %>%
+  group_by(ANALYSIS) %>%
+  count(ANALYSIS_DATE) %>%
+  filter(n != 4)
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "C3M_HP" & ANALYSIS_DATE == "16-03-2022")
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "CALC2" & ANALYSIS_DATE == "10-06-2022")
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "HuARGS" & ANALYSIS_DATE == "20-01-2021")
+```
+
+```{r}
+data %>%
+  filter(ANALYSIS == "N_MID" & ANALYSIS_DATE == "25-07-2024") %>%
+  count(VISIT, TREATMENT_SHORT)
+```
+
+```{r}
+data %>%
+  filter(ANALYSIS == "N_MID" & ANALYSIS_DATE == "26-07-2024") %>%
+  count(VISIT, TREATMENT_SHORT)
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "PRO_C3_roHP" & ANALYSIS_DATE == "07-04-2022")
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "T2CM" & ANALYSIS_DATE == "19-02-2021") %>%
+  count(VISIT, TREATMENT_SHORT)
+```
+
+```{r}
+data.sub %>%
+  filter(ANALYSIS == "VICM_HP" & ANALYSIS_DATE == "16-08-2024") %>%
+  count(VISIT, TREATMENT_SHORT)
+```
+
+Thankfully, most of the cases are 1 singular sample being measured on one date. This is likely because the sample did not pass QC on first measurement and was then remeasured on another date. Unfortunately, it looks like a lot of the samples for visit 2 were measured on separate dates for N-MID which is an issue. For these patients, we cannot separate the effect of differing measurement dates and treatment effect / visit effect.
+
+We will not be able to do batch corrections on sCTX-I, uCTX-II as we have no analysis date information. We will also skip N-MID. Thankfully, CTX-I and N-MID are measured on COBAS and are typically not associated with batch effects (from previous experience).
+
+For the instances where only one sample was measured on a date, we will remove these samples for corrections and add them back in afterwards.
+
+```{r}
+save.rows = data.sub %>%
+  filter(ANALYSIS == "C3M_HP" & ANALYSIS_DATE == "16-03-2022" | ANALYSIS == "CALC2" & ANALYSIS_DATE == "10-06-2022" |  ANALYSIS == "HuARGS" & ANALYSIS_DATE == "20-01-2021" | ANALYSIS == "PRO_C3_roHP" & ANALYSIS_DATE == "07-04-2022")
+  
+data.sub = data.sub %>%
+  filter(!(ANALYSIS == "C3M_HP" & ANALYSIS_DATE == "16-03-2022")) %>%
+  filter(!(ANALYSIS == "CALC2" & ANALYSIS_DATE == "10-06-2022")) %>%
+  filter(!(ANALYSIS == "HuARGS" & ANALYSIS_DATE == "20-01-2021")) %>%
+  filter(!(ANALYSIS == "PRO_C3_roHP" & ANALYSIS_DATE == "07-04-2022"))
+
+biomarkers = data.sub %>%
+  filter(ANALYSIS %ni% c("sCTX_I", "uCTX_II_CREA", "N_MID")) %>%
+  pull(ANALYSIS) %>%
+  unique
+```
+
+```{r}
+# Fit linear mixed-effects model (LMM) 
+fits = lapply(biomarkers,
+              function(mark){
+                print(mark)
+                # Remove baseline data
+                dat.sub = data.sub %>% 
+                  filter(ANALYSIS == mark)
+                
+                # Fit model
+                fit = lmer(log_value_winsor ~ VISIT + TREATMENT_SHORT + Sex + Age + (1|ANALYSIS_DATE) + (1|SUBJECT), data = dat.sub)
+
+                # Collect random effects attributed to analysis date
+                ranef.df = data.frame(dev_adjusted = ranef(fit)$ANALYSIS_DATE[[1]],
+                                      ANALYSIS_DATE = rownames(ranef(fit)$ANALYSIS_DATE),
+                                      # Compute deviation from mean of original date
+                                      dev_original = dat.sub %>%
+                                        # Deviation from general mean (All analysis dates combined)
+                                        mutate(gm = log_value_winsor - mean(log_value_winsor, na.rm = TRUE)) %>%
+                                        group_by(ANALYSIS_DATE) %>%
+                                        # Deviation of each date from general mean
+                                        summarise(d.naive = mean(gm, na.rm = TRUE)) %>%
+                                        pull(d.naive),
+                                      ANALYSIS = mark)
+                return(ranef.df)
+              })
+```
+
+```{r}
+fit = do.call(rbind, fits)
+
+# Correct each observation with the random effects attributed to the specific analysis date
+data.adj = data.sub %>%
+  left_join(fit, by = c("ANALYSIS", "ANALYSIS_DATE")) %>%
+  group_by(ANALYSIS, ANALYSIS_DATE) %>%
+  mutate(log_value_winsor_adjusted = log_value_winsor - dev_adjusted,
+         value_winsor_adjusted = exp(log_value_winsor_adjusted) - 1) %>%
+  group_by(ANALYSIS) %>%
+  mutate(overall_original_mean = mean(value_winsor, na.rm = TRUE),
+         overall_adjusted_mean = mean(value_winsor_adjusted, na.rm = TRUE),
+         min_val = min(value_winsor, na.rm = TRUE),
+         max_val = max(value_winsor, na.rm = TRUE)) %>%
+  ungroup %>%
+  mutate(log_value_winsor_adjusted = coalesce(log_value_winsor_adjusted, log_value_winsor),
+         value_winsor_adjusted = coalesce(value_winsor_adjusted, value_winsor)) %>%
+  select(-dev_original, -dev_adjusted, -log_value)
+
+# Add back the removed rows 
+save.rows = save.rows %>%
+  select(-log_value) %>%
+  mutate(log_value_winsor_adjusted = NA,
+         value_winsor_adjusted = NA,
+         overall_original_mean = NA,
+         overall_adjusted_mean = NA,
+         min_val = NA,
+         max_val = NA)
+
+data.adj = rbind(data.adj, save.rows) %>%
+  unique
+```
+
+Check whether the adjusted deviation (random effects) is pulling the data closer to the general mean.
+
+```{r, warning = FALSE, fig.width = 15, fig.height = 20}
+# Plot deviation of original overall means and adjusted
+fit %>%
+  pivot_longer(cols = c("dev_adjusted", "dev_original"),
+               names_to = "Variable",
+               values_to = "Deviation") %>% 
+  ggplot(aes(x = ANALYSIS_DATE, y = Deviation, color = Variable)) +
+  geom_point(size = 3) +
+  facet_wrap(~ANALYSIS, ncol = 2, scales = "free") +
+  theme_cowplot() +
+  custom_theme(x.angle = 90, vjust = 0.5) +
+  labs(title = "BLUPs")
+```
+
+```{r, message = FALSE, warning = FALSE}
+plots = lapply(biomarkers,
+               function(mark){
+                 # Results across measurement dates
+                 p1 = data.adj %>% 
+                   custom_violin_box(marker = mark, 
+                                     y.value = "value_winsor",
+                                     x.value = "ANALYSIS_DATE",
+                                     fill.column = "ANALYSIS_DATE",
+                                     plot.title = "Original data",
+                                     notch = FALSE) +
+                   geom_hline(aes(yintercept = overall_original_mean), 
+                              linetype = "dashed", 
+                              linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                   custom_theme(x.angle = 90, vjust = 0.5)
+
+                p2 = data.adj %>% 
+                   custom_violin_box(marker = mark,
+                                     y.value = "value_winsor_adjusted",
+                                     x.value = "ANALYSIS_DATE",
+                                     fill.column = "ANALYSIS_DATE",
+                                     plot.title = "Adjusted data",
+                                     notch = FALSE) +
+                   geom_hline(aes(yintercept = overall_adjusted_mean), 
+                              linetype = "dashed", 
+                              linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                   custom_theme(x.angle = 90, vjust = 0.5)
+                
+                # Results across measurement dates, split by time points
+                p3 = data.adj %>% 
+                  custom_violin_box(marker = mark,
+                                    y.value = "value_winsor",
+                                    x.value = "ANALYSIS_DATE",
+                                    fill.column = "VISIT",
+                                    plot.title = "Original data",
+                                    show.legend = TRUE,
+                                    notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_original_mean), 
+                             linetype = "dashed",
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme(x.angle = 90, vjust = 0.5)
+                
+                p4 = data.adj %>% 
+                  custom_violin_box(marker = mark,
+                                    y.value = "value_winsor_adjusted", 
+                                    x.value = "ANALYSIS_DATE",
+                                    fill.column = "VISIT",
+                                    plot.title = "Adjusted data",
+                                    show.legend = TRUE,
+                                    notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_adjusted_mean), 
+                             linetype = "dashed", 
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme(x.angle = 90, vjust = 0.5)
+                
+                 # Results across time points, split by measurement dates
+                p5 = data.adj %>% 
+                  custom_violin_box(marker = mark,
+                                    y.value = "value_winsor", 
+                                    x.value = "VISIT",
+                                    fill.column = "ANALYSIS_DATE",
+                                    plot.title = "Original data",
+                                    show.legend = TRUE,
+                                    notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_original_mean),
+                             linetype = "dashed", 
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme()
+                
+                p6 = data.adj %>% 
+                  custom_violin_box(marker = mark,
+                                    y.value = "value_winsor_adjusted", 
+                                    x.value = "VISIT", 
+                                    fill.column = "ANALYSIS_DATE",
+                                    plot.title = "Adjusted data",
+                                    show.legend = TRUE,
+                                    notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_adjusted_mean),
+                             linetype = "dashed", 
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme()
+                
+                
+                # Results across dates, split by treatment
+                p7 = data.adj %>%
+                   custom_violin_box(marker = mark, 
+                                     y.value = "value_winsor",
+                                     x.value = "ANALYSIS_DATE",
+                                     fill.column = "TREATMENT_SHORT",
+                                     plot.title = mark,
+                                     show.legend = TRUE,
+                                     notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_original_mean),
+                             linetype = "dashed", 
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme(x.angle = 90, vjust = 0.5)
+                
+                p8 = data.adj %>%
+                   custom_violin_box(marker = mark, 
+                                     y.value = "value_winsor_adjusted",
+                                     x.value = "ANALYSIS_DATE",
+                                     fill.column = "TREATMENT_SHORT",
+                                     plot.title = mark,
+                                     show.legend = TRUE,
+                                     notch = FALSE) +
+                  geom_hline(aes(yintercept = overall_adjusted_mean),
+                             linetype = "dashed", 
+                             linewidth = 1) +
+                   ylim(data.adj %>% filter(ANALYSIS == mark) %>% drop_na(min_val) %>% pull(min_val) %>% unique,
+                        data.adj %>% filter(ANALYSIS == mark) %>% drop_na(max_val) %>% pull(max_val) %>% unique) +
+                  custom_theme(x.angle = 90, vjust = 0.5)
+                
+                # Collect all into one grob
+                p = arrangeGrob(grobs = list(p1, p2, p3, p4, p5, p6, p7, p8), ncol = 1, 
+                                 top = textGrob(mark, gp = gpar(fontsize = 25, fontface = "bold")))
+                return(p)
+})
+names(plots) = biomarkers
+```
+
+
+
+## C2M-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$C2M_HP, ncol = 1)
+```
+
+
+
+## C3M-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$C3M_HP, ncol = 1)
+```
+
+
+
+## CALC2
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$CALC2, ncol = 1)
+```
+
+
+
+## CRPC
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$CRPC, ncol = 1)
+```
+
+The data looks ridiculous. Remove biomarker.
+
+
+
+## CRPM
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$CRPM, ncol = 1)
+```
+
+
+
+## HuARGS
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$HuARGS, ncol = 1)
+```
+
+
+
+## PRO-C1-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$PRO_C1_HP, ncol = 1)
+```
+
+
+
+## PRO-C2
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$PRO_C2, ncol = 1)
+```
+
+
+
+## PRO-C2-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$PRO_C2_HP, ncol = 1)
+```
+
+
+
+## PRO-C3-roHP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$PRO_C3_roHP, ncol = 1)
+```
+
+
+
+## PRO-C4-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$PRO_C4_HP, ncol = 1)
+```
+
+
+
+## reC1M-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$RE_C1M_HP, ncol = 1)
+```
+
+
+
+## T2CM
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$T2CM, ncol = 1)
+```
+
+
+
+## VICM-HP
+
+```{r, message = FALSE, warning = FALSE, fig.width = 20, fig.height = 45}
+grid.arrange(plots$VICM_HP, ncol = 1)
+```
+
+
+
+# Missing data imputation
+
+Overview of missing data.
+
+```{r}
+# Remove CRPC
+data.adj = data.adj %>%
+  filter(ANALYSIS != "CRPC")
+```
+
+Number of patients in total:
+
+```{r}
+data.adj %>% 
+  pull(SUBJECT) %>%
+  unique %>%
+  length
+```
+
+Number of biomarker measurements per visit per treatment group.
+
+```{r}
+data.wide = data.adj %>%
+  select(SUBJECT, VISIT, TREATMENT_SHORT, ANALYSIS, log_value_winsor_adjusted) %>%
+  mutate(VISIT = paste0("VISIT", VISIT)) %>%
+  pivot_wider(names_from = c("VISIT", "ANALYSIS"),
+              values_from = log_value_winsor_adjusted)
+
+colSums(!is.na(data.wide))
+```
+
+
+
+## Visit 2
+
+```{r}
+data.wide.2 = data.wide %>%
+  select(SUBJECT, TREATMENT_SHORT, starts_with("VISIT2"))
+
+missing.bool.2 = data.wide.2 %>% 
+  select(-SUBJECT, -TREATMENT_SHORT) %>%
+  is.na() %>% 
+  as.data.frame %>%
+  mutate_at(vars(everything()), as.integer)
+colnames(missing.bool.2) = gsub("VISIT2_", "", colnames(missing.bool.2))
+
+pheatmap(missing.bool.2, 
+         scale = "none",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         show_rownames = FALSE,
+         fontsize = 12)
+```
+
+```{r}
+colSums(is.na(data.wide.2))
+```
+
+```{r}
+round(colSums(is.na(data.wide.2))*100/244,1)
+```
+
+Notice, we have very high missing percentage for PRO-C2-HP and VICM-HP (both visits). Keep in mind we still have 257 samples with missing visit information that we still need to hear back from data management about, which have been dropped for now. This may change the results. For now, we will drop PRO-C2-HP and VICM-HP.
+
+```{r}
+data.adj = data.adj %>%
+  filter(ANALYSIS %ni% c("PRO_C2_HP", "VICM_HP"))
+
+data.wide = data.wide %>%
+  select(-contains(c("PRO_C2_HP", "VICM_HP")))
+
+data.wide.2 = data.wide %>%
+  select(SUBJECT, TREATMENT_SHORT, starts_with("VISIT2"))
+```
+
+See if we have patients with too many missing values. Here, we will have a special focus on the biomarkers included in the endotype prediction model (sCTX-I, C2M, C3M, PRO-C2, PRO-C4, and N-MID)
+
+```{r}
+data.wide.2 %>%
+  filter(rowSums(is.na(.)) >= 4) %>%
+  select_if(~ any(is.na(.)))
+```
+
+It does not seem to be the case.
+
+Total number of missing data now for visit 2.
+
+```{r}
+colSums(is.na(data.wide.2))
+```
+
+```{r}
+round(colSums(is.na(data.wide.2))*100/244,1)
+```
+
+```{r}
+sum(is.na(data.wide.2))/(nrow(data.wide.2)*ncol(data.wide.2))*100
+```
+
+
+
+## Visit 8
+
+```{r}
+data.wide.8 = data.wide %>%
+  select(SUBJECT, TREATMENT_SHORT, starts_with("VISIT8"))
+
+missing.bool.8 = data.wide.8 %>% 
+  select(-SUBJECT, -TREATMENT_SHORT) %>%
+  is.na() %>% 
+  as.data.frame %>%
+  mutate_at(vars(everything()), as.integer)
+colnames(missing.bool.8) = gsub("VISIT8_", "", colnames(missing.bool.8))
+
+pheatmap(missing.bool.8, 
+         scale = "none",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         show_rownames = FALSE,
+         fontsize = 12)
+```
+
+We have several subjects with no biomarker data. Remove. 
+
+```{r}
+ drop.subjects.8 = data.wide.8 %>%
+  rowwise %>%
+  mutate(sum_na = sum(is.na(c_across(where(is.numeric))))) %>%
+  filter(sum_na >= 4) %>%
+  pull(SUBJECT)
+
+length(drop.subjects.8)
+```
+
+
+```{r}
+data.wide.8 = data.wide.8 %>%
+  filter(SUBJECT %ni% drop.subjects.8)
+
+missing.bool.8 = data.wide.8 %>% 
+  select(-SUBJECT, -TREATMENT_SHORT) %>%
+  is.na() %>% 
+  as.data.frame %>%
+  mutate_at(vars(everything()), as.integer)
+colnames(missing.bool.8) = gsub("VISIT8_", "", colnames(missing.bool.8))
+
+pheatmap(missing.bool.8, 
+         scale = "none",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         show_rownames = FALSE,
+         fontsize = 12)
+```
+
+Check how much missing without these.
+
+```{r}
+colSums(is.na(data.wide.8))
+```
+
+```{r}
+round(colSums(is.na(data.wide.8))*100/nrow(data.wide.8),1)
+```
+
+```{r}
+sum(is.na(data.wide.8))/(nrow(data.wide.8)*ncol(data.wide.8))*100
+```
+
+Missing data will be imputed for each visit and treatment group separately to avoid bias.
+
+```{r}
+data.wide.2.pla = data.wide.2 %>%
+  filter(TREATMENT_SHORT == "PLACEBO")
+data.wide.2.miv = data.wide.2 %>%
+  filter(TREATMENT_SHORT != "PLACEBO")
+
+data.wide.8.pla = data.wide.8 %>%
+  filter(TREATMENT_SHORT == "PLACEBO")
+data.wide.8.miv = data.wide.8 %>%
+  filter(TREATMENT_SHORT != "PLACEBO")
+
+# Number of patients in each group
+cbind(visit2_pla = nrow(data.wide.2.pla),
+      visit2_miv = nrow(data.wide.2.miv),
+      visit8_pla = nrow(data.wide.8.pla),
+      visit8_miv = nrow(data.wide.8.miv))
+```
+
+```{r}
+# Impute follow-up time sets separately
+imputation_method = "RF"
+data.wide.list = list(data.wide.2.pla, data.wide.2.miv, data.wide.8.pla, data.wide.8.miv)
+impute.list = lapply(data.wide.list,
+                     function(data.wide){
+                       custom_impute(data.wide %>% select(-TREATMENT_SHORT), impute_function = imputation_method)
+                     })
+
+data.wide.2.pla.imp.rf = impute.list[[1]]$imp
+data.wide.2.miv.imp.rf = impute.list[[2]]$imp
+data.wide.8.pla.imp.rf = impute.list[[3]]$imp
+data.wide.8.miv.imp.rf = impute.list[[4]]$imp
+
+# Normalized root mean squared error (RSME divided by the number of observations), 
+# i.e. out-of-bag error
+cbind(visit2_pla = impute.list[[1]]$OOB, 
+      visit2_miv = impute.list[[2]]$OOB,
+      visit8_pla = impute.list[[3]]$OOB, 
+      visit8_miv = impute.list[[4]]$OOB)
+
+# Merge data
+data.wide.imp.rf.pla = data.wide.2.pla.imp.rf %>% 
+  left_join(data.wide.8.pla.imp.rf, by = "SUBJECT") %>%
+  mutate(TREATMENT_SHORT = "PLACEBO")
+
+data.wide.imp.rf.miv = data.wide.2.miv.imp.rf %>% 
+  left_join(data.wide.8.miv.imp.rf, by = "SUBJECT") %>%
+  mutate(TREATMENT_SHORT = "MIV-711")
+
+data.wide.imp.rf = rbind(data.wide.imp.rf.pla, 
+      data.wide.imp.rf.miv) %>%
+  relocate(SUBJECT, TREATMENT_SHORT) %>%
+  arrange(SUBJECT)
+
+```
+
+
+
+# Save data
+
+Save log-transformed, outlier-trimmed, batch-corrected, missing-data imputed biomarker data.
+
+```{r, eval = FALSE}
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = paste0("medivir_biomarkers_", imputation_method, "_imputed_30OCT2024.tsv")
+write.table(data.wide.imp.rf,
+            file = paste0(wkdir, filename),
+            row.names = FALSE,
+            quote = FALSE, 
+            sep = "\t")
+```
+
+Save clinical information
+
+```{r, eval = FALSE}
+data.out = data.adj %>%
+  select(SUBJECT, VISIT, Age, Sex, BMI, contains(c("WOMAC", "TREATMENT")), NRS_KNEE_PAIN) %>% 
+  unique %>%
+  relocate(SUBJECT, VISIT, contains("TREATMENT")) %>%
+  arrange(SUBJECT, VISIT)
+
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/DATA_COLLECTED_2024/"
+filename = "medivir_clinical_30OCT2024.tsv"
+write.table(data.out,
+            file = paste0(wkdir, filename),
+            row.names = FALSE,
+            quote = FALSE, 
+            sep = "\t")
+```

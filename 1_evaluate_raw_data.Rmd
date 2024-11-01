@@ -1,0 +1,176 @@
+---
+title: "Evaluate raw biochemical measurements"
+date: "`r Sys.Date()`"
+toc-title: "Contents"
+author: "MTH (mth@nordicbio.com)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: false
+    theme: united
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include = FALSE, fig.align = "center"}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(gridExtra)
+library(ggbeeswarm)
+library(readxl)
+library(lubridate)
+library(tidyr)
+library(stringr)
+options(dplyr.summarise.inform = FALSE)
+"%ni%" = Negate("%in%")
+
+# Define function to customize plots
+custom_theme = function(axis.text = 14, x.angle = 0, hjust = 0.5, vjust = 1){
+    theme(axis.text.x = element_text(size = axis.text, hjust = hjust, vjust = vjust, angle = x.angle),
+        axis.text.y = element_text(size = axis.text),
+        axis.title.y = element_text(size = axis.text),
+        axis.title.x = element_text(size = axis.text),
+        axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = axis.text,
+                                    face = "bold"),
+        plot.title = element_text(size = 20, hjust = 0.5, vjust = 1))
+}
+
+# Custom violin plot with layered box-plot
+custom_violin_box = function(dat, marker, y.value, x.value = "time", fill.column = "time", marker.column = "ANALYSIS", plot.title = NULL, show.legend = FALSE, outlier = FALSE, notch = TRUE){
+  p = dat %>%
+    filter(!!sym(marker.column) == marker) %>%
+    ggplot(aes(x = !!sym(x.value), y = !!sym(y.value), fill = !!sym(fill.column))) +
+    geom_violin(aes(fill = !!sym(fill.column)), alpha = 0.5,
+                color = NA,
+                show.legend = show.legend) +
+    geom_boxplot(notch = notch, 
+                  outlier.size = -1,
+                  alpha = 0.7,
+                  show.legend = FALSE,
+                  width = 0.9) +
+     geom_quasirandom(shape = 21, size = 2,
+                      color ="black",
+                      alpha = 0.3,
+                      show.legend = FALSE) +
+    scale_fill_viridis_d() +
+    theme_cowplot() +
+    custom_theme() +
+    labs(x = "", 
+         y = dat %>% pull(UNIT),
+         title = plot.title)
+  
+  if(outlier){
+    p = p + geom_text(aes(label = ifelse(outlier == 1, SUBJ_ID, "")), size = 3,
+            position = position_dodge(width = 1))
+  }
+  return(p)
+}
+```
+
+
+
+
+# i10: Variation over time
+
+```{r}
+# Fetch data
+wkdir = "R:/STATS/02 WP/WP001_RHEUMA/ST016_Medivir/data_gdpr/NB2015-042 MIV-711-201-302 2024/"
+filename = "raw_measurements_i10.csv"
+raw.dat = read.csv(file = paste0(wkdir, filename), header = TRUE, sep = ",")
+i10.dat = raw.dat %>%
+  filter(platform == "i10")
+
+# Change to time format for plotting 
+i10.dat = i10.dat %>% 
+  mutate(time_format = as.POSIXct(time, format = "%H:%M:%S"),
+         CONC = as.numeric(CONC))
+
+biomarkers = unique(i10.dat$ANALYTE)
+
+plots = lapply(biomarkers,
+              function(mark){
+                # Concentration vs time 
+                res.subset = i10.dat %>%
+                  filter(ANALYTE == mark)
+                
+                p1 = res.subset %>%
+                  ggplot(aes(x = time_format, y = CONC)) +
+                  geom_point() +
+                  geom_smooth(method = "loess", span = 2, se = FALSE) +
+                  facet_wrap(~date, ncol = 2, scales = "free_x") +
+                  theme_cowplot() +
+                  custom_theme(x.angle = 45, hjust = 1) + 
+                  labs(y = res.subset$UNIT,
+                       x = "Time stamp",
+                       title = mark)
+                
+                # Log transformed concentrations showing mean
+                p2 = res.subset %>%
+                  ggplot(aes(x = time_format, y = log10(CONC))) +
+                  geom_point() +
+                  geom_smooth(method = "loess", span = 2, se = FALSE) +
+                  facet_wrap(~date, ncol = 2, scales = "free_x") +
+                  geom_hline(aes(yintercept = log10(mean(CONC))), 
+                             linetype = "dashed") +
+                  theme_cowplot() +
+                  custom_theme(x.angle = 45, hjust = 1) + 
+                  labs(y = paste(res.subset$UNIT, " (log10)"),
+                       x = "Time stamp",
+                       title = mark)
+                
+                return(list(p1 = p1, p2 = p2))
+              })
+names(plots) = biomarkers
+```
+
+
+
+## PRO-C2-HP
+
+```{r, warning = FALSE, message = FALSE, fig.width = 8.5, fig.height = 14}
+plots$PRO_C2_HP$p1
+```
+
+```{r, warning = FALSE, message = FALSE, fig.width = 8.5, fig.height = 14}
+plots$PRO_C2_HP$p2
+```
+
+
+
+## VICM-HP
+
+```{r, warning = FALSE, message = FALSE, fig.width = 8.5, fig.height = 14}
+plots$VICM_HP$p1
+```
+
+```{r, warning = FALSE, message = FALSE, fig.width = 8.5, fig.height = 14}
+plots$VICM_HP$p2
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
